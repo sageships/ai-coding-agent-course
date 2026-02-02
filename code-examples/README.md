@@ -1,88 +1,45 @@
-# 🎓 Code Examples — Run Them Yourself!
+# 🎓 Code Examples
 
-This folder contains working code for every major concept in the course.
+Each module has two files:
+- **CONCEPT.md** — Theory, diagrams, the WHY
+- **demo.ts** — Clean code to run and show
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
 cd code-examples
 npm install
-
-# 2. Set your API key
-export ANTHROPIC_API_KEY=your-key-here
-
-# 3. Run any example
-npm run example:01  # First LLM call
-npm run example:02  # Tool system basics
-npm run example:03  # Repo mapping
-npm run example:05  # Complete agent
+export ANTHROPIC_API_KEY=your-key
+npm run demo:01   # Run Module 1 demo
 ```
 
-## What's Inside
+## Structure
 
-### 01-foundations/
-Your first LLM API calls. Learn:
-- Basic completions
-- Streaming responses
-- Multi-turn conversations
-- Token counting & costs
+```
+01-foundations/
+├── CONCEPT.md    ← Read this first (explains the theory)
+└── demo.ts       ← Run this (shows it working)
 
-### 02-tools/
-The tool system that gives LLMs superpowers:
-- Defining tools with JSON Schema
-- Executing tool calls safely
-- The basic agent loop
+02-tools/
+├── CONCEPT.md    ← Tool system explained
+└── demo.ts       ← Agent loop in action
 
-### 03-context/
-How to help LLMs understand codebases:
-- Building repository maps
-- Finding relevant files
-- Smart context selection
+03-context/
+├── CONCEPT.md    ← How LLMs "see" code
+└── demo.ts       ← Repo mapping demo
 
-### 04-edits/
-(Coming soon) Reliable code editing:
-- Diff formats
-- Search/replace blocks
-- Error recovery
-
-### 05-agent-loop/
-The complete picture:
-- Full working agent
-- Multiple tools combined
-- Iteration until completion
-
-## Pro Tips
-
-1. **Read the comments** — Each file is heavily documented to explain WHY, not just WHAT
-
-2. **Modify and experiment** — Change the prompts, add new tools, break things and fix them
-
-3. **Check the costs** — Watch your API usage, especially with the agent loop
-
-4. **Start simple** — Begin with 01-foundations before jumping to the complete agent
-
-## Troubleshooting
-
-**"Cannot find module"**
-```bash
-npm install
+05-agent-loop/
+└── demo.ts       ← Complete working agent
 ```
 
-**"ANTHROPIC_API_KEY not set"**
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
+## For Recording Videos
 
-**"Permission denied" on grep/commands**
-The search and command tools use Unix commands. On Windows, use WSL or modify the tools.
+1. **First:** Open `CONCEPT.md`, explain diagrams
+2. **Then:** Switch to `demo.ts`, run it
+3. **Look for:** `📺 SHOW THIS` and `▶️ RUN THIS` markers in code
 
-## Next Steps
+## Tech Stack
 
-After running these examples, you'll understand:
-- ✅ How LLMs process code tasks
-- ✅ How tools extend LLM capabilities  
-- ✅ How context management works
-- ✅ How to build a complete coding agent
-
-Now go build your own! 🚀
+- **AI SDK** (Vercel) — Clean API for LLM calls
+- **@ai-sdk/anthropic** — Claude integration
+- **Zod** — Schema validation for tools
