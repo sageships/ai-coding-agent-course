@@ -139,6 +139,129 @@ function add(a: number, b: number): number {
 
 ---
 
+### 🔧 HOW IT WORKS MECHANICALLY: Tree-Sitter Deep Dive
+
+**What is an AST (Abstract Syntax Tree)?**
+
+An AST is a tree representation of code where:
+- Each **node** represents a syntactic construct (function, variable, expression)
+- **Parent-child relationships** show nesting (a function contains statements)
+- The tree preserves the **structure** but discards irrelevant details (whitespace, semicolons)
+
+```
+Source Code:                          AST (simplified):
+                                      
+function greet(name) {                program
+  return "Hello, " + name;             └── function_declaration
+}                                           ├── identifier: "greet"
+                                            ├── formal_parameters
+                                            │    └── identifier: "name"
+                                            └── statement_block
+                                                 └── return_statement
+                                                      └── binary_expression
+                                                           ├── string: "Hello, "
+                                                           └── identifier: "name"
+```
+
+**How Tree-Sitter Generates the AST (Incremental Parsing)**
+
+Tree-sitter uses a **GLR parser** with these steps:
+
+```
+1. LEXICAL ANALYSIS (Tokenization)
+   "function greet(name) { return x; }"
+          ↓
+   [FUNCTION, IDENTIFIER:"greet", LPAREN, IDENTIFIER:"name", RPAREN, LBRACE, RETURN, ...]
+
+2. SYNTAX ANALYSIS (Parsing)
+   Uses a grammar file (grammar.js) that defines rules:
+   
+   function_declaration: $ => seq(
+     'function',
+     field('name', $.identifier),
+     field('parameters', $.formal_parameters),
+     field('body', $.statement_block)
+   )
+
+3. TREE CONSTRUCTION
+   Builds nodes bottom-up, connecting children to parents
+
+4. INCREMENTAL UPDATE (the magic!)
+   When you edit line 50, tree-sitter doesn't re-parse the whole file.
+   It reuses unchanged subtrees and only re-parses the affected region.
+   
+   Before edit:  [===== tree =====]
+   After edit:   [=== reused ===][new][=== reused ===]
+```
+
+**Traversing the Tree to Find Symbols**
+
+We use **tree queries** — a pattern-matching language for ASTs:
+
+```scheme
+; Query to find all function declarations in TypeScript
+(function_declaration
+  name: (identifier) @function.name) @function.def
+
+; Query to find class methods
+(method_definition
+  name: (property_identifier) @method.name) @method.def
+
+; Query to find exported items
+(export_statement
+  declaration: (_) @export.declaration)
+```
+
+**The actual traversal algorithm:**
+
+```
+ALGORITHM: ExtractSymbols(tree, query)
+─────────────────────────────────────────────────────
+INPUT: parsed tree, tree-sitter query
+OUTPUT: list of symbols with names and locations
+
+1. matches ← query.matches(tree.rootNode)      // Run query against tree
+2. symbols ← []
+
+3. FOR each match in matches:
+     node ← match.captures['name']              // Get the captured node
+     symbol ← {
+       name: node.text,                         // The actual text "greet"
+       kind: inferKind(node.parent.type),       // "function", "class", etc.
+       startLine: node.startPosition.row,
+       endLine: node.parent.endPosition.row,
+       signature: extractSignature(node.parent) // Just the declaration
+     }
+     symbols.append(symbol)
+
+4. RETURN symbols
+
+FUNCTION extractSignature(node):
+   // Get text from start of node to opening brace
+   text ← node.text
+   bracePos ← text.indexOf('{')
+   IF bracePos > 0:
+     RETURN text.substring(0, bracePos) + "{...}"
+   ELSE:
+     RETURN text
+```
+
+**Why Tree-Sitter and Not Regex?**
+
+Regex fails on real code:
+
+```typescript
+// Regex: /function\s+(\w+)/g would miss:
+const greet = function(name) {}     // anonymous function
+const greet = (name) => {}          // arrow function
+class Foo { greet(name) {} }        // method
+function /* comment */ greet() {}   // comment in middle
+
+// Tree-sitter handles ALL of these because it understands structure
+```
+
+---
+
 **[SETTING UP TREE-SITTER - 3:00-6:00]**
 
 "Install the packages:"
@@ -413,6 +536,181 @@ Let's build a ranking system."
 
 ---
 
+### 🔧 HOW IT WORKS MECHANICALLY: File Relevance Scoring (THE KEY PART)
+
+This is where the magic happens. We need to answer: **which files should we send to the LLM?**
+
+**Step 1: Build the Dependency Graph**
+
+A dependency graph has:
+- **Nodes** = files in your project
+- **Edges** = import relationships (A imports B → edge from A to B)
+
+```
+ALGORITHM: BuildDependencyGraph(projectRoot)
+─────────────────────────────────────────────────────
+INPUT: path to project root
+OUTPUT: graph with nodes (files) and edges (imports)
+
+1. files ← scanDirectory(projectRoot, extensions=[.ts, .js, .py, ...])
+2. graph ← { nodes: Set(), edges: Map(), reverseEdges: Map() }
+
+3. FOR each file in files:
+     graph.nodes.add(file)
+     content ← readFile(file)
+     imports ← extractImports(content)
+     
+     FOR each importPath in imports:
+       resolvedPath ← resolveImport(file, importPath)
+       IF resolvedPath exists in files:
+         // file imports resolvedPath
+         graph.edges[file].add(resolvedPath)
+         // resolvedPath is imported BY file
+         graph.reverseEdges[resolvedPath].add(file)
+
+4. RETURN graph
+
+Example graph for a simple project:
+─────────────────────────────────────────────────────
+
+  src/api/routes.ts ──imports──▶ src/auth/service.ts
+         │                              │
+         │                              │
+         ▼                              ▼
+  src/utils/logger.ts          src/models/user.ts
+
+Represented as:
+  nodes: {routes.ts, service.ts, logger.ts, user.ts}
+  edges: {
+    routes.ts → [service.ts, logger.ts],
+    service.ts → [user.ts]
+  }
+  reverseEdges: {
+    service.ts → [routes.ts],    // "who imports me"
+    logger.ts → [routes.ts],
+    user.ts → [service.ts]
+  }
+```
+
+**Step 2: The PageRank-Style Algorithm**
+
+PageRank was invented by Google to rank web pages. The insight: **a page is important if important pages link to it.**
+
+For code: **a file is important if important files import it.**
+
+```
+ALGORITHM: RankFiles(graph, seedFiles, damping=0.85, iterations=20)
+─────────────────────────────────────────────────────
+INPUT: dependency graph, seed files (task-relevant), damping factor, iterations
+OUTPUT: Map<file, score>
+
+// damping = probability of following an edge vs. jumping to random file
+// Higher damping (0.85) = more emphasis on link structure
+// Lower damping (0.5) = more emphasis on seed files
+
+1. n ← graph.nodes.size
+2. scores ← Map()
+
+   // Initialize: everyone starts equal
+3. FOR each node in graph.nodes:
+     scores[node] ← 1/n   // e.g., 4 files → each starts at 0.25
+
+   // Boost seed files (files mentioned in user's task)
+4. FOR each seed in seedFiles:
+     scores[seed] ← scores[seed] + 0.5  // Big boost!
+
+5. FOR i ← 1 TO iterations:
+     newScores ← Map()
+     
+     FOR each node in graph.nodes:
+       // Base score: random jump probability
+       score ← (1 - damping) / n    // e.g., 0.15 / 4 = 0.0375
+       
+       // Add contributions from files that IMPORT this node
+       importers ← graph.reverseEdges[node]  // Who imports me?
+       FOR each importer in importers:
+         importerScore ← scores[importer]
+         importerOutDegree ← graph.edges[importer].size  // How many files does importer import?
+         contribution ← damping × (importerScore / importerOutDegree)
+         score ← score + contribution
+       
+       newScores[node] ← score
+     
+     scores ← newScores
+
+6. RETURN scores
+```
+
+**Step 3: Concrete Example with Numbers**
+
+Let's trace through a real example:
+
+```
+Project structure:
+  routes.ts → imports → [service.ts, logger.ts]
+  service.ts → imports → [user.ts]
+  
+User query: "fix the login bug"
+  → "login" matches in service.ts → seed file!
+
+ITERATION 0 (Initial):
+─────────────────────────────────────────────────────
+  routes.ts:  0.25
+  service.ts: 0.25 + 0.5 (seed boost) = 0.75  ← Boosted!
+  logger.ts:  0.25
+  user.ts:    0.25
+
+ITERATION 1:
+─────────────────────────────────────────────────────
+For each file, calculate new score:
+
+routes.ts:
+  base = (1-0.85)/4 = 0.0375
+  importers = [] (nobody imports routes)
+  score = 0.0375
+
+service.ts:
+  base = 0.0375
+  importers = [routes.ts]
+  routes.ts has score 0.25, out-degree 2 (imports 2 files)
+  contribution = 0.85 × (0.25 / 2) = 0.106
+  score = 0.0375 + 0.106 = 0.144
+
+logger.ts:
+  base = 0.0375
+  importers = [routes.ts]
+  contribution = 0.85 × (0.25 / 2) = 0.106
+  score = 0.0375 + 0.106 = 0.144
+
+user.ts:
+  base = 0.0375
+  importers = [service.ts]
+  service.ts has score 0.75, out-degree 1
+  contribution = 0.85 × (0.75 / 1) = 0.6375  ← Big contribution from high-scoring importer!
+  score = 0.0375 + 0.6375 = 0.675
+
+After iteration 1:
+  routes.ts:  0.038
+  service.ts: 0.144
+  logger.ts:  0.144
+  user.ts:    0.675  ← user.ts is now highest because service.ts imports it!
+
+... after 20 iterations, scores converge:
+  user.ts:    0.45   ← HIGHEST (inherited importance from service.ts)
+  service.ts: 0.28   ← seed file
+  logger.ts:  0.15
+  routes.ts:  0.12
+```
+
+**Why This Works**
+
+The seed boost on `service.ts` propagates through the graph:
+- `service.ts` imports `user.ts`
+- So `user.ts` inherits importance from `service.ts`
+- If you're fixing login bugs, you probably need to see the User model!
+
+---
+
 **[THE DEPENDENCY GRAPH - 0:30-4:00]**
 
 "First, we build a graph where:
@@ -678,6 +976,106 @@ Embeddings fix this. They let us search by meaning, not just text."
 
 ---
 
+### 🔧 HOW IT WORKS MECHANICALLY: Embeddings Deep Dive
+
+**What Are Embeddings, Really?**
+
+An embedding is NOT just "a vector." It's a **learned mapping** from text to a high-dimensional space where **semantic similarity = geometric proximity**.
+
+```
+Text                    → Neural Network → 1536 numbers (text-embedding-3-small)
+                                           
+"user authentication"   → [0.021, -0.034, 0.089, ..., 0.012]
+                              ↑
+                          These aren't random!
+                          They encode MEANING.
+```
+
+**How the Embedding Model Learns**
+
+During training (which OpenAI/Cohere already did for you):
+
+```
+Training objective: Make similar texts have similar vectors
+
+1. Take millions of text pairs known to be similar:
+   ("How do I login?", "Authentication process")
+   ("What's the weather?", "Temperature forecast")
+
+2. Train neural network to:
+   - Map similar pairs to NEARBY points in vector space
+   - Map different pairs to FAR points in vector space
+
+3. After training, the network "understands" semantic similarity
+```
+
+**The Geometry of Embeddings**
+
+Imagine a 3D space (real embeddings are 1536D, but same principle):
+
+```
+                    ▲ dimension 3 (maybe: "security-related")
+                    │
+                    │     • authentication
+                    │    • login      
+                    │   • credentials
+                    │                    • weather
+                    │                   • temperature
+                    │                  • forecast
+                    └──────────────────────────────────────▶ dimension 1
+                   /
+                  /
+                 ▼ dimension 2
+
+Similar concepts cluster together!
+```
+
+**How Cosine Similarity Works (Geometrically)**
+
+Cosine similarity measures the **angle** between two vectors, not the distance:
+
+```
+                    ▲
+                    │    B = [0.8, 0.9]
+                    │   /
+                    │  /  θ = 10° → cos(θ) = 0.98 (very similar!)
+                    │ /
+                    │/ A = [0.7, 0.7]
+                    └────────────────▶
+
+Formula:
+                   A · B           a₁×b₁ + a₂×b₂ + ... + aₙ×bₙ
+  cos(θ) = ─────────────────── = ─────────────────────────────────
+           ‖A‖ × ‖B‖           √(a₁² + a₂² + ...) × √(b₁² + b₂² + ...)
+
+Example:
+  A = [0.7, 0.7]
+  B = [0.8, 0.9]
+  
+  dot product = 0.7×0.8 + 0.7×0.9 = 0.56 + 0.63 = 1.19
+  ‖A‖ = √(0.49 + 0.49) = 0.99
+  ‖B‖ = √(0.64 + 0.81) = 1.20
+  
+  cosine similarity = 1.19 / (0.99 × 1.20) = 0.998 ≈ 0.99
+
+Range: -1 (opposite) to 1 (identical)
+In practice for embeddings: usually 0.3 to 0.95
+```
+
+**Why Cosine Over Euclidean Distance?**
+
+```
+Euclidean distance is affected by vector LENGTH:
+  A = [1, 1]
+  B = [2, 2]     ← Same direction, different length
+  Distance = √2  ← Suggests they're different!
+  
+Cosine ignores length, only measures DIRECTION:
+  cos(A, B) = 1.0  ← Correctly identifies they're identical in meaning
+```
+
+---
+
 **[WHAT ARE EMBEDDINGS? - 0:30-4:00]**
 
 "An embedding is a vector (list of numbers) that captures the 'meaning' of text.
@@ -695,6 +1093,133 @@ Similarity:
 ```
 
 "We can embed all our code, then find code similar to any query."
+
+---
+
+### 🔧 HOW IT WORKS MECHANICALLY: The Search Algorithm
+
+**How We Chunk Code for Embedding**
+
+You can't embed an entire file — it would lose specificity. We split code into **meaningful chunks**:
+
+```
+ALGORITHM: ChunkCode(file, code, maxChunkSize=1000)
+─────────────────────────────────────────────────────
+INPUT: file path, file content, max characters per chunk
+OUTPUT: list of chunks with metadata
+
+1. lines ← code.split('\n')
+2. chunks ← []
+3. currentChunk ← []
+4. startLine ← 0
+5. currentSize ← 0
+
+6. FOR i ← 0 TO lines.length:
+     line ← lines[i]
+     
+     // Check if this is a "natural break point"
+     isBreakpoint ← (
+       line matches /^(export |async )?(function|class|interface)/ OR
+       line matches /^}$/ OR  // end of block
+       currentSize >= maxChunkSize
+     )
+     
+     IF isBreakpoint AND currentChunk.length > 5:
+       // Save current chunk
+       chunks.append({
+         file: file,
+         startLine: startLine,
+         endLine: i - 1,
+         content: currentChunk.join('\n')
+       })
+       // Reset for next chunk
+       currentChunk ← []
+       startLine ← i
+       currentSize ← 0
+     
+     currentChunk.append(line)
+     currentSize ← currentSize + line.length
+
+7. // Don't forget the last chunk
+   IF currentChunk.length > 0:
+     chunks.append({...})
+
+8. RETURN chunks
+
+Why chunk at function/class boundaries?
+─────────────────────────────────────────────────────
+Each chunk should be semantically coherent:
+  ✓ A complete function → good chunk
+  ✓ A complete class → good chunk
+  ✗ Half a function → embedding won't be meaningful
+  ✗ Random 1000 chars → loses context
+```
+
+**The Full Search Algorithm**
+
+```
+ALGORITHM: SemanticCodeSearch(query, index, topK=10)
+─────────────────────────────────────────────────────
+INPUT: search query, pre-embedded code index, number of results
+OUTPUT: top K most similar code chunks
+
+1. // Embed the query (one API call)
+   queryEmbedding ← OpenAI.embeddings.create(
+     model: "text-embedding-3-small",
+     input: query
+   )
+
+2. // Calculate similarity to EVERY chunk in the index
+   scored ← []
+   FOR each chunk in index.chunks:
+     similarity ← cosineSimilarity(queryEmbedding, chunk.embedding)
+     scored.append({ chunk, score: similarity })
+
+3. // Sort by score descending
+   scored.sortBy(item => item.score, descending=true)
+
+4. // Return top K
+   RETURN scored[0:topK].map(item => item.chunk)
+
+Time complexity: O(n × d) where n = chunks, d = embedding dimensions
+─────────────────────────────────────────────────────
+For 10,000 chunks × 1536 dimensions:
+  = 15,360,000 multiply operations
+  ≈ 5-10ms on modern CPU (vectors are fast!)
+
+For larger codebases, use approximate nearest neighbors (HNSW, IVF):
+  - Faiss (Facebook)
+  - Pinecone, Weaviate, Qdrant (vector databases)
+  - Trade: 99% accuracy for 100x speed
+```
+
+**Practical Example: Searching for "user authentication"**
+
+```
+Query: "user authentication"
+        ↓
+Query embedding: [0.12, -0.08, 0.34, ..., 0.05]
+
+Chunk 1: src/auth/login.ts (lines 1-45)
+  "export async function login(email: string, password: string)..."
+  Embedding: [0.11, -0.09, 0.32, ..., 0.06]
+  Similarity: 0.94  ← HIGH MATCH
+
+Chunk 2: src/utils/logger.ts (lines 1-30)
+  "export function log(level: string, message: string)..."
+  Embedding: [0.45, 0.22, -0.15, ..., 0.18]
+  Similarity: 0.23  ← LOW MATCH
+
+Chunk 3: src/models/user.ts (lines 1-50)
+  "export interface User { id: string; email: string; }..."
+  Embedding: [0.18, -0.05, 0.28, ..., 0.09]
+  Similarity: 0.78  ← MEDIUM-HIGH MATCH
+
+Results sorted:
+  1. src/auth/login.ts (0.94)      ← Most relevant!
+  2. src/models/user.ts (0.78)
+  3. src/utils/logger.ts (0.23)
+```
 
 ---
 
@@ -906,6 +1431,172 @@ for (const chunk of results) {
 **[INTRO - 0:00-0:30]**
 
 "Now let's combine everything: repo map, graph ranking, and semantic search into a unified context assembly pipeline."
+
+---
+
+### 🔧 HOW IT WORKS MECHANICALLY: Context Assembly
+
+**The Decision Tree: What Goes in Context?**
+
+```
+                          User Task: "Fix login bug"
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+            1. ALWAYS INCLUDE  2. TASK-RELEVANT  3. SEMANTIC MATCHES
+            ─────────────────  ─────────────────  ──────────────────
+            • Repo map (1-2k)  • Files mentioned  • Code chunks similar
+            • Open files       • Graph-ranked     • to the query
+            • Recent edits     • imports/exports  
+                    │               │               │
+                    ▼               ▼               ▼
+                    └───────────────┼───────────────┘
+                                    │
+                                    ▼
+                          TOKEN BUDGET CHECK
+                         (total < maxTokens?)
+                                    │
+                        ┌───────────┴───────────┐
+                        │ YES                   │ NO
+                        ▼                       ▼
+                    ADD TO CONTEXT          PRIORITIZE & TRUNCATE
+                                           (drop lowest-ranked first)
+```
+
+**The Token Budgeting Algorithm**
+
+```
+ALGORITHM: AssembleContext(task, budget=25000)
+─────────────────────────────────────────────────────
+INPUT: user task, token budget
+OUTPUT: assembled context string
+
+// Token allocation strategy:
+//   Repo map:        ~2000 tokens (8%)
+//   Relevant files: ~15000 tokens (60%)
+//   Search results:  ~5000 tokens (20%)
+//   Buffer:          ~3000 tokens (12%) for safety
+
+1. context ← []
+   usedTokens ← 0
+
+2. // PHASE 1: Always include the repo map
+   repoMap ← buildRepoMap(projectRoot)
+   mapText ← formatRepoMap(repoMap)
+   
+   IF tokens(mapText) > 2000:
+     mapText ← truncateToTokens(mapText, 2000)
+   
+   context.append("## Repository Structure\n" + mapText)
+   usedTokens ← usedTokens + tokens(mapText)
+
+3. // PHASE 2: Add relevant files (full content)
+   seeds ← findMentionedFiles(task)        // Files named in the task
+   scores ← rankFiles(graph, seeds)        // PageRank with seeds
+   rankedFiles ← sortByScore(scores)       // Highest first
+   
+   FOR each file in rankedFiles:
+     content ← readFile(file)
+     fileTokens ← tokens(content)
+     
+     IF usedTokens + fileTokens > 20000:   // Leave room for search
+       BREAK
+     
+     context.append("### " + file + "\n```\n" + content + "\n```")
+     usedTokens ← usedTokens + fileTokens
+
+4. // PHASE 3: Fill remaining budget with semantic search
+   searchResults ← semanticSearch(task, topK=20)
+   
+   FOR each chunk in searchResults:
+     // Skip if we already included this file
+     IF chunk.file already in context:
+       CONTINUE
+     
+     chunkTokens ← tokens(chunk.content)
+     
+     IF usedTokens + chunkTokens > budget:
+       BREAK
+     
+     context.append("### " + chunk.file + ":" + chunk.lines + "\n```\n" + chunk.content + "\n```")
+     usedTokens ← usedTokens + chunkTokens
+
+5. RETURN context.join('\n')
+```
+
+**Priority Ordering (When Budget is Tight)**
+
+When you can't fit everything, prioritize:
+
+```
+PRIORITY RANKING:
+─────────────────────────────────────────────────────
+1. CRITICAL (always include)
+   ├─ Repo map (without this, LLM is blind)
+   └─ Files explicitly named in task
+
+2. HIGH (include if space)
+   ├─ Files that import/are imported by critical files
+   ├─ Files with matching function/class names
+   └─ Recently edited files
+
+3. MEDIUM (include if space)
+   ├─ High-scoring semantic search results
+   └─ Files in the same directory as critical files
+
+4. LOW (include if budget allows)
+   ├─ Test files for affected code
+   └─ Config files
+
+5. NEVER INCLUDE
+   ├─ node_modules, vendor, dist
+   ├─ Generated files
+   └─ Binary files
+```
+
+**Token Estimation**
+
+```
+FUNCTION estimateTokens(text):
+─────────────────────────────────────────────────────
+  // Simple heuristic: ~4 characters per token for code
+  // More accurate: use tiktoken library
+  
+  RETURN ceil(text.length / 4)
+
+For accurate counts (when precision matters):
+  import { encoding_for_model } from 'tiktoken'
+  const enc = encoding_for_model('gpt-4')
+  const tokens = enc.encode(text).length
+```
+
+**Example: Budget Allocation for 25k Token Budget**
+
+```
+Task: "Fix the login bug where users can't reset password"
+
+Budget: 25,000 tokens
+
+Allocated:
+─────────────────────────────────────────────────────
+Component                    Tokens    Cumulative
+─────────────────────────────────────────────────────
+Repo map (condensed)         1,200       1,200
+src/auth/login.ts (critical) 2,800       4,000
+src/auth/password-reset.ts   3,100       7,100   ← mentioned!
+src/models/user.ts           1,500       8,600
+src/api/auth-routes.ts       2,200      10,800
+src/utils/email.ts           1,800      12,600
+[semantic: reset logic]      1,200      13,800
+[semantic: validation]         900      14,700
+[semantic: error handling]   1,100      15,800
+─────────────────────────────────────────────────────
+Buffer remaining             9,200
+─────────────────────────────────────────────────────
+
+Total used: 15,800 / 25,000 (63%)
+Remaining buffer allows LLM to request more files if needed
+```
 
 ---
 

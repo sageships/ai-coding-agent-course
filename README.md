@@ -46,20 +46,55 @@ By the end, you'll have built a working AI coding agent and understand exactly h
 
 ```
 ai-coding-agent-course/
-├── COURSE-OUTLINE.md      # Full course roadmap
-├── modules/
-│   ├── MODULE-1-FOUNDATIONS.md
-│   ├── MODULE-2-TOOL-SYSTEM.md
-│   ├── MODULE-3-CODE-CONTEXT.md
-│   ├── MODULE-4-EDIT-FORMATS.md
-│   ├── MODULE-5-AGENT-LOOP.md
-│   ├── MODULE-6-ADVANCED.md
-│   ├── MODULE-7-PRODUCTION.md
-│   └── MODULE-8-FINAL-PROJECT.md
-├── scripts/               # Video scripts (coming soon)
-├── code-examples/         # Starter code (coming soon)
-└── assets/               # Diagrams and visuals
+├── COURSE-OUTLINE.md      # Master roadmap with all video scripts
+├── README.md              # This file
+│
+├── modules/               # Detailed course content
+│   ├── MODULE-1-FOUNDATIONS.md   # LLM basics, architecture overview
+│   ├── MODULE-2-TOOL-SYSTEM.md   # Function calling, tool design
+│   ├── MODULE-3-CODE-CONTEXT.md  # Repo maps, embeddings, file selection
+│   ├── MODULE-4-EDIT-FORMATS.md  # Diffs, search/replace, applying changes
+│   ├── MODULE-5-AGENT-LOOP.md    # The think-act-observe loop
+│   ├── MODULE-6-ADVANCED.md      # Git, LSP, testing integration
+│   ├── MODULE-7-PRODUCTION.md    # Security, cost, UX
+│   └── MODULE-8-FINAL-PROJECT.md # Building the complete agent
+│
+├── code-examples/         # Runnable demos for each module
+│   ├── 01-foundations/    # Basic LLM API calls
+│   ├── 02-tools/          # Tool implementation examples
+│   ├── 03-context/        # Repo mapping and file selection
+│   ├── 04-edits/          # Edit format parsers
+│   ├── 05-agent-loop/     # Complete agent loop
+│   ├── package.json       # Shared dependencies
+│   └── README.md          # How to run the demos
+│
+└── assets/                # Diagrams and visuals (coming soon)
 ```
+
+### Why Modules?
+
+The course is organized into **8 progressive modules** because:
+
+1. **Each builds on the previous** — You can't understand context selection (Module 3) without knowing what tools are (Module 2). The agent loop (Module 5) combines everything.
+
+2. **Maps to video sessions** — Each module = 45-75 min of video content, broken into 3-5 videos of ~10-15 min each. Digestible chunks.
+
+3. **Reference-friendly** — Already understand tools? Jump straight to Module 3. Each module is self-contained with its theory, code, and exercises.
+
+4. **Code alignment** — `modules/MODULE-3-CODE-CONTEXT.md` has the theory → `code-examples/03-context/` has the runnable demo.
+
+### How Deep Do We Go?
+
+Each module has two layers:
+
+| Layer | What It Covers | Where |
+|-------|---------------|-------|
+| **Conceptual** | High-level "what and why" | `modules/MODULE-X.md` |
+| **Mechanical** | Algorithm details, step-by-step "how" | `code-examples/0X-*/CONCEPT.md` |
+
+For example, Module 3 (Code Context):
+- **Conceptual**: "We use tree-sitter to parse code and extract symbols"
+- **Mechanical**: "Tree-sitter generates an AST. We traverse it with a cursor, matching node types like `function_declaration`. Here's the exact query..."
 
 ## 🛠 Prerequisites
 
