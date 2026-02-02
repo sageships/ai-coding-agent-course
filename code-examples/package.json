@@ -1,0 +1,20 @@
+{
+  "name": "ai-coding-agent-course-examples",
+  "version": "1.0.0",
+  "description": "Runnable code examples for the AI Coding Agent course",
+  "type": "module",
+  "scripts": {
+    "example:01": "npx tsx 01-foundations/01-first-llm-call.ts",
+    "example:02": "npx tsx 02-tools/01-basic-tools.ts",
+    "example:03": "npx tsx 03-context/01-repo-map.ts",
+    "example:05": "npx tsx 05-agent-loop/01-complete-agent.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
